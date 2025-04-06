@@ -1,0 +1,126 @@
+#define BLYNK_TEMPLATE_ID "TMPL3DKx54XuH"
+#define BLYNK_TEMPLATE_NAME "Smart Irrigation System EcoIrrigate"
+
+#define BLYNK_PRINT Serial
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <DHT.h>
+
+// WiFi & Blynk credentials
+char auth[] = "pKfrnCSM4sqJZdyqoet8HECDtryEzAYD";
+char ssid[] = "vivo T3 5G";
+char pass[] = "00000000";
+
+// Weather API
+const char* weatherAPIKey = "224d08469ed24493be4101803252503";
+const char* city = "Kalyani"; 
+
+// Sensor Pins
+#define DHTPIN 26       
+#define DHTTYPE DHT11   
+#define SOIL_MOISTURE_PIN 33   
+#define RELAY_PIN 23        
+
+// Virtual Pins
+#define SOIL_VPIN V2    
+#define TEMP_VPIN V1    
+#define HUM_VPIN V3     
+#define PUMP_VPIN V0    
+#define RAIN_VPIN V4     // 🔥 New Virtual Pin for Rain Data
+
+DHT dht(DHTPIN, DHTTYPE);
+
+int manualPumpState = 0;
+bool pumpStatusNotified = false; 
+
+void setup() {
+  Serial.begin(115200);
+  Blynk.begin(auth, ssid, pass);
+  dht.begin();
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH); // Turn off pump by default
+}
+
+void loop() {
+  Blynk.run();
+  
+  // Read sensor data
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+  int soilMoistureValue = analogRead(SOIL_MOISTURE_PIN);
+  
+  if (isnan(humidity) || isnan(temperature)) {
+    Serial.println("Failed to read from DHT sensor!");
+    return;
+  }
+
+  // Convert soil moisture value to percentage
+  int soilMoisturePercent = map(soilMoistureValue, 0, 4095, 0, 100);
+  soilMoisturePercent = (soilMoisturePercent - 100) * -1;
+
+  // Fetch rain data from WeatherAPI
+  bool isRaining = getWeatherData();
+
+  // Send data to Blynk
+  Blynk.virtualWrite(TEMP_VPIN, temperature);
+  Blynk.virtualWrite(HUM_VPIN, humidity);
+  Blynk.virtualWrite(SOIL_VPIN, soilMoisturePercent);
+  Blynk.virtualWrite(RAIN_VPIN, isRaining ? 1 : 0); // Send rain status to Blynk
+
+  // Automatic irrigation logic
+  if (soilMoisturePercent < 20 && !isRaining) {
+    digitalWrite(RELAY_PIN, HIGH);  // Turn on pump
+    Serial.println("Water Pump ON (Auto - Dry Soil & No Rain)");
+
+    if (!pumpStatusNotified) {
+      Blynk.logEvent("ecoirrigate", "⚠ Low Soil Moisture! Pump turned ON.");
+      pumpStatusNotified = true;
+    }
+
+  } else if (manualPumpState == 1) {
+    digitalWrite(RELAY_PIN, HIGH);  // Turn on pump manually
+    Serial.println("Water Pump ON (Manual Control)");
+
+  } else {
+    digitalWrite(RELAY_PIN, LOW); // Turn off pump
+    Serial.println("Water Pump OFF (Soil Moisture OK or Rain Detected)");
+    pumpStatusNotified = false;
+  }
+
+  delay(5000);
+}
+
+// Blynk control for manual pump
+BLYNK_WRITE(PUMP_VPIN) {
+  manualPumpState = param.asInt();
+  Serial.print("Manual Pump Control: ");
+  Serial.println(manualPumpState == 1 ? "ON" : "OFF");
+}
+
+// Function to fetch rain data from WeatherAPI
+bool getWeatherData() {
+  HTTPClient http;
+  String url = "https://api.weatherapi.com/v1/current.json?key=" + String(weatherAPIKey) + "&q=" + String(city);
+  http.begin(url);
+  int httpCode = http.GET();
+  bool isRaining = false;
+
+  if (httpCode == 200) {
+    String payload = http.getString();
+    StaticJsonDocument<1024> doc;
+    deserializeJson(doc, payload);
+
+    float rain = doc["current"]["precip_mm"];  // Get rain amount
+    isRaining = (rain > 0); // If rain > 0, it's raining
+    Serial.print("Rain Data: ");
+    Serial.print(rain);
+    Serial.println(" mm");
+  } else {
+    Serial.println("Failed to get weather data!");
+  }
+
+  http.end();
+  return isRaining;
+}
